@@ -1,3 +1,5 @@
 .env
 pings/
 log/
+saves/
+direcciones.json

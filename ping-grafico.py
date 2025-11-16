@@ -14,14 +14,18 @@ from dotenv import load_dotenv
 
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QMessageBox
 import pyqtgraph as pg
 import argparse
+import json
 
 load_dotenv()
 
 DEFAULT_IP = os.getenv("DEFAULT_IP", "8.8.8.8")
 DEFAULT_INTERVAL = float(os.getenv("DEFAULT_INTERVAL", 2.0))
-MAX_POINTS = 1800 
+MAX_POINTS = 1800
+
+RUTA_JSON = "direcciones.json"
 
 # Colores
 BG_COLOR = os.getenv("BG_COLOR", "#000000")
@@ -57,6 +61,121 @@ def hacer_ping(ip):
 
     return None, salida
 
+def validar_ip(ip):
+    import ipaddress
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except:
+        return False
+
+def cargar_direcciones():
+    """Carga lista de direcciones desde JSON."""
+    if not os.path.exists(RUTA_JSON):
+        return []
+    try:
+        with open(RUTA_JSON, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return []
+
+def guardar_direcciones(lista):
+    """Guarda lista de direcciones en JSON."""
+    try:
+        with open(RUTA_JSON, "w", encoding="utf-8") as f:
+            json.dump(lista, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print("Error guardando archivo JSON:", e)
+
+def menu_principal():
+    while True:
+        os.system('cls')
+        print("\n=========== MENÚ PRINCIPAL ===========")
+        print("\n")
+        print("1) Iniciar monitoreo")
+        print("2) Agregar nueva dirección")
+        print("3) Salir")
+        print("\n")
+        print("======================================")
+
+        opcion = input("Elige una opción: ").strip()
+
+        if opcion == "1":
+            return "monitorear"
+        elif opcion == "2":
+            return "agregar"
+        elif opcion == "3":
+            return "salir"
+        else:
+            print("Opción inválida.")
+
+def menu_monitoreo():
+    while True:
+        os.system('cls')
+        print("\n======= INICIAR MONITOREO =======")
+        print("\n")
+        print("1) Elegir de direcciones guardadas")
+        print("2) Introducir IP manualmente")
+        print("3) Volver")
+        print("\n")
+        print("==================================")
+
+        opcion = input("Elige una opción: ").strip()
+
+        if opcion in ("1", "2", "3"):
+            return opcion
+        print("Opción inválida.")
+
+def elegir_guardada():
+    direcciones = cargar_direcciones()
+    if not direcciones:
+        print("\nNo hay direcciones guardadas.")
+        return None
+
+    print("\n===== DIRECCIONES GUARDADAS =====")
+    for idx, item in enumerate(direcciones, start=1):
+        print(f"{idx}) {item['nombre']} — {item['ip']}")
+
+    print(f"{len(direcciones)+1}) Volver")
+
+    while True:
+        op = input("Elige una dirección: ").strip()
+
+        if op.isdigit():
+            op = int(op)
+            if 1 <= op <= len(direcciones):
+                return direcciones[op-1]["ip"]
+            elif op == len(direcciones)+1:
+                return None
+
+        print("Opción inválida.")
+
+def agregar_direccion():
+    print("\n=== AGREGAR NUEVA DIRECCIÓN ===")
+
+    nombre = input("Nombre descriptivo: ").strip()
+    if not nombre:
+        print("Nombre no válido.")
+        return
+
+    ip = input("IP: ").strip()
+
+    if not validar_ip(ip):
+        print("IP no válida.")
+        return
+
+    direcciones = cargar_direcciones()
+
+    # validar duplicados
+    for d in direcciones:
+        if d["ip"] == ip:
+            print("Esa IP ya está guardada.")
+            return
+
+    direcciones.append({"nombre": nombre, "ip": ip})
+    guardar_direcciones(direcciones)
+
+    print("Dirección guardada.")
 
 # ---------------------------
 # Ventana principal
@@ -154,10 +273,9 @@ class PingMonitor(QtWidgets.QMainWindow):
         self.btn_clear.clicked.connect(self.clear)
         btn_layout.addWidget(self.btn_clear)
 
-        self.btn_export = QtWidgets.QPushButton("Exportar sesión / última hora")
-        self.btn_export.clicked.connect(self.export_current_block)
-        btn_layout.addWidget(self.btn_export)
-
+        self.btn_save = QtWidgets.QPushButton("Exportar sesión / última hora")
+        self.btn_save.clicked.connect(self.guardar_manual)
+        btn_layout.addWidget(self.btn_save)
 
         layout.addLayout(btn_layout)
 
@@ -227,11 +345,38 @@ class PingMonitor(QtWidgets.QMainWindow):
 
         # actualizar gráfica
         self.update_plot()
-        self.historial.append((ts, ms))
 
         # Guardar cada MAX_POINTS muestras en un archivo
         if len(self.historial) % MAX_POINTS == 0:
             self.export_current_block()
+
+    def guardar_manual(self):
+        """Guarda manualmente el contenido actual del historial."""
+        try:
+            ip_folder = f"saves/{self.ip}"
+            os.makedirs(ip_folder, exist_ok=True)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"{ip_folder}/save_{timestamp}.txt"
+
+            with open(filename, "w", encoding="utf-8") as f:
+                for item in self.historial:
+                    # Asegurar que tiene 3 campos
+                    if len(item) == 3:
+                        ts, ms, linea = item
+                    else:
+                        # si por error quedó de 2, completar
+                        ts, ms = item
+                        linea = ""
+                    hora = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
+                    f.write(f"{hora} | {ms} ms | {linea}\n")
+
+            QMessageBox.information(self, "Guardado", f"Archivo guardado en:\n{filename}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo guardar:\n{str(e)}")
+
+
 
     def export_current_block(self):
         """Guarda la sesión actual en un archivo y continúa."""
@@ -324,16 +469,45 @@ class PingMonitor(QtWidgets.QMainWindow):
 # Main
 # ---------------------------
 def main():
-    ip_input = input(f"IP a monitorear [{DEFAULT_IP}]: ").strip() or DEFAULT_IP
-    try:
-        intervalo = float(input(f"Tiempo de muestreo (s) [{DEFAULT_INTERVAL}]: ").strip() or DEFAULT_INTERVAL)
-    except:
-        intervalo = DEFAULT_INTERVAL
+    while True:
+        accion = menu_principal()
 
-    app = QtWidgets.QApplication(sys.argv)
-    win = PingMonitor(ip_input, intervalo)
-    # Ejecutar loop Qt
-    sys.exit(app.exec_())
+        if accion == "salir":
+            print("Saliendo...")
+            return
+
+        elif accion == "agregar":
+            agregar_direccion()
+
+        elif accion == "monitorear":
+            opcion = menu_monitoreo()
+
+            if opcion == "3":  # volver
+                continue
+
+            elif opcion == "1":
+                ip = elegir_guardada()
+                if not ip:
+                    continue
+
+            elif opcion == "2":
+                ip = input("IP a monitorear: ").strip()
+                if not validar_ip(ip):
+                    print("IP inválida.")
+                    continue
+
+            # intervalo se mantiene como antes
+            try:
+                intervalo = float(input(
+                    f"Tiempo de muestreo (s) [{DEFAULT_INTERVAL}]: "
+                ).strip() or DEFAULT_INTERVAL)
+            except:
+                intervalo = DEFAULT_INTERVAL
+            
+            # inicio del monitor
+            app = QtWidgets.QApplication(sys.argv)
+            win = PingMonitor(ip, intervalo)
+            sys.exit(app.exec_())
 
 if __name__ == "__main__":
     main()
