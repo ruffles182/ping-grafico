@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import Qt
 import pyqtgraph as pg
+import argparse
 
 load_dotenv()
 
@@ -22,25 +23,40 @@ DEFAULT_IP = os.getenv("DEFAULT_IP", "8.8.8.8")
 DEFAULT_INTERVAL = float(os.getenv("DEFAULT_INTERVAL", 2.0))
 MAX_POINTS = 1800 
 
+# Colores
+BG_COLOR = os.getenv("BG_COLOR", "#000000")
+FG_COLOR = os.getenv("FG_COLOR", "#00FF00")
+FONT_SIZE = int(os.getenv("FONT_SIZE", 12))
+TIEMPO_MAXIMO = int(os.getenv("TIEMPO_MAXIMO", 100))
+COLOR_ALERTA = os.getenv("COLOR_ALERTA", "#FF0000")
+
 
 # ---------------------------
 # Función ping (Windows)
 # ---------------------------
 def hacer_ping(ip):
-    """Hace un ping -n 1 en Windows y devuelve latencia en ms o None si falla."""
+    """Hace un ping -n 1 en Windows y devuelve latencia en ms y línea completa."""
     try:
-        salida = subprocess.run(["ping", "-n", "1", ip], capture_output=True, text=True, timeout=3).stdout
+        result = subprocess.run(
+            ["ping", "-n", "1", ip],
+            capture_output=True,
+            text=True,
+            timeout=3
+        )
+        salida = result.stdout.strip()
     except subprocess.TimeoutExpired:
-        return None
+        return None, f"Timeout al hacer ping a {ip}"
 
-    # Regex flexible (español/inglés)
+    # Regex para extraer latencia
     m = re.search(r"(?:Tiempo|tiempo|time|Time)=? ?(\d+)ms", salida)
     if m:
         try:
-            return int(m.group(1))
+            return int(m.group(1)), salida
         except:
-            return None
-    return None
+            return None, salida
+
+    return None, salida
+
 
 # ---------------------------
 # Ventana principal
@@ -111,6 +127,29 @@ class PingMonitor(QtWidgets.QMainWindow):
         self.btn_pause.toggled.connect(self.toggle_pause)
         btn_layout.addWidget(self.btn_pause)
 
+        self.console = QtWidgets.QTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        self.console.setFontFamily("Courier")  # monoespaciado
+
+        self.btn_toggle_console = QtWidgets.QPushButton("Ocultar Terminal")
+        self.btn_toggle_console.setCheckable(True)
+        self.btn_toggle_console.toggled.connect(self.toggle_console)
+        btn_layout.addWidget(self.btn_toggle_console)
+
+        # Estilo dinámico
+        self.console.setStyleSheet(f"""
+            background-color: {BG_COLOR};
+            color: {FG_COLOR};
+        """)
+
+        # Tamaño de fuente
+        font = self.console.font()
+        font.setPointSize(FONT_SIZE)
+        self.console.setFont(font)
+
+        layout.addWidget(self.console)
+
         self.btn_clear = QtWidgets.QPushButton("Limpiar")
         self.btn_clear.clicked.connect(self.clear)
         btn_layout.addWidget(self.btn_clear)
@@ -127,14 +166,55 @@ class PingMonitor(QtWidgets.QMainWindow):
         # mostrar
         self.show()
 
+    def toggle_console(self, checked):
+        """
+        Alterna visibilidad de la consola.
+        Si está oculta, la gráfica ocupa todo el espacio.
+        """
+        self.console.setVisible(not checked)
+        if checked:
+            self.btn_toggle_console.setText("Mostrar Terminal")
+        else:
+            self.btn_toggle_console.setText("Ocultar Terminal")
+
     def tick_ping(self):
         """Se llama por QTimer cada intervalo: hace ping y actualiza datos/gráfica."""
         if self.btn_pause.isChecked():
             return
 
+        ms, linea_completa = hacer_ping(self.ip)
         ts = time.time()
-        ms = hacer_ping(self.ip)
-        self.historial.append((ts, ms))
+        self.historial.append((ts, ms, linea_completa))
+
+        # línea original del ping
+        # convertir saltos de línea a <br> para que QTextEdit respete la separación
+        linea_html = linea_completa.replace("\n", "<br>")
+
+        # hora
+        hora = time.strftime('%H:%M:%S', time.localtime(ts))
+
+        # color según alerta
+        if ms is None or ms > TIEMPO_MAXIMO:
+            color = COLOR_ALERTA
+        else:
+            color = FG_COLOR
+
+        # agregar SOLO UNA línea a la consola
+        self.console.append(
+            f'<span style="color:{color}">{hora} - {linea_html}</span>'
+        )
+
+        # scroll automático
+        self.console.verticalScrollBar().setValue(
+            self.console.verticalScrollBar().maximum()
+        )
+        # Auto scroll
+        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+
+        linea_mostrar = f"{time.strftime('%H:%M:%S')} - {linea_completa}"
+        self.console.append(linea_mostrar)
+        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+
         # registrar
         self.tiempos.append(ts)
         self.latencias.append(ms if ms is not None else 0)
@@ -177,10 +257,11 @@ class PingMonitor(QtWidgets.QMainWindow):
                 f.write(f"# IP: {self.ip}\n")
                 f.write(f"# Inicio: {fecha_inicio}\n")
                 f.write(f"# Fin: {fecha_fin}\n")
-                f.write(f"timestamp,datetime,latencia_ms\n")
-                for ts, ms in self.historial:
+                f.write("timestamp,datetime,latencia_ms,linea_ping\n")
+                for ts, ms, linea in self.historial:
                     dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-                    f.write(f"{ts},{dt},{ms if ms is not None else 'FAIL'}\n")
+                    f.write(f"{ts},{dt},{ms if ms is not None else 'FAIL'},\"{linea}\"\n")
+
             print(f"Bloque guardado: {ruta_completa}")
             self.historial = []  # limpiar para siguiente bloque
         except Exception as e:
