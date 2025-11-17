@@ -39,7 +39,7 @@ COLOR_ALERTA = os.getenv("COLOR_ALERTA", "#FF0000")
 # Función ping (Windows)
 # ---------------------------
 def hacer_ping(ip):
-    """Hace un ping -n 1 en Windows y devuelve latencia en ms y línea completa."""
+    """Hace un ping -n 1 en Windows y devuelve latencia en ms y línea limpia."""
     try:
         result = subprocess.run(
             ["ping", "-n", "1", ip],
@@ -49,17 +49,41 @@ def hacer_ping(ip):
         )
         salida = result.stdout.strip()
     except subprocess.TimeoutExpired:
-        return None, f"Timeout al hacer ping a {ip}"
+        return None, f"error: Timeout al hacer ping a {ip}"
 
-    # Regex para extraer latencia
+    # Buscar la línea de respuesta específica
+    lineas = salida.split('\n')
+    linea_respuesta = None
+    
+    for linea in lineas:
+        # Buscar línea con "Respuesta desde" o "Reply from"
+        if "Respuesta desde" in linea or "Reply from" in linea:
+            linea_respuesta = linea.strip()
+            break
+        # También buscar líneas de error comunes
+        elif "inaccesible" in linea.lower() or "unreachable" in linea.lower():
+            linea_respuesta = f"error: {linea.strip()}"
+            break
+        elif "no pudo encontrar" in linea.lower() or "could not find" in linea.lower():
+            linea_respuesta = f"error: {linea.strip()}"
+            break
+        elif "Tiempo de espera" in linea or "Request timed out" in linea or "timed out" in linea.lower():
+            linea_respuesta = f"error: Tiempo de espera agotado"
+            break
+
+    # Si no encontramos respuesta específica
+    if not linea_respuesta:
+        linea_respuesta = "error: Respuesta desconocida"
+
+    # Extraer latencia
     m = re.search(r"(?:Tiempo|tiempo|time|Time)=? ?(\d+)ms", salida)
     if m:
         try:
-            return int(m.group(1)), salida
+            return int(m.group(1)), linea_respuesta
         except:
-            return None, salida
+            return None, linea_respuesta
 
-    return None, salida
+    return None, linea_respuesta
 
 def validar_ip(ip):
     import ipaddress
@@ -300,16 +324,12 @@ class PingMonitor(QtWidgets.QMainWindow):
         if self.btn_pause.isChecked():
             return
 
-        ms, linea_completa = hacer_ping(self.ip)
+        ms, linea_limpia = hacer_ping(self.ip)
         ts = time.time()
-        self.historial.append((ts, ms, linea_completa))
-
-        # línea original del ping
-        # convertir saltos de línea a <br> para que QTextEdit respete la separación
-        linea_html = linea_completa.replace("\n", "<br>")
+        self.historial.append((ts, ms, linea_limpia))
 
         # hora
-        hora = time.strftime('%H:%M:%S', time.localtime(ts))
+        hora = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
 
         # color según alerta
         if ms is None or ms > TIEMPO_MAXIMO:
@@ -317,21 +337,15 @@ class PingMonitor(QtWidgets.QMainWindow):
         else:
             color = FG_COLOR
 
-        # agregar SOLO UNA línea a la consola
+        # Mostrar en consola: fecha-hora - línea limpia
         self.console.append(
-            f'<span style="color:{color}">{hora} - {linea_html}</span>'
+            f'<span style="color:{color}">{hora} - {linea_limpia}</span>'
         )
 
         # scroll automático
         self.console.verticalScrollBar().setValue(
             self.console.verticalScrollBar().maximum()
         )
-        # Auto scroll
-        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
-
-        linea_mostrar = f"{time.strftime('%H:%M:%S')} - {linea_completa}"
-        self.console.append(linea_mostrar)
-        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
 
         # registrar
         self.tiempos.append(ts)
@@ -339,9 +353,9 @@ class PingMonitor(QtWidgets.QMainWindow):
 
         # actualizar status label
         if ms is None:
-            self.status_label.setText(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - FAIL")
+            self.status_label.setText(f"{hora} - FAIL")
         else:
-            self.status_label.setText(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {ms} ms")
+            self.status_label.setText(f"{hora} - {ms} ms")
 
         # actualizar gráfica
         self.update_plot()
@@ -351,32 +365,49 @@ class PingMonitor(QtWidgets.QMainWindow):
             self.export_current_block()
 
     def guardar_manual(self):
-        """Guarda manualmente el contenido actual del historial."""
+        """Guarda manualmente el historial actual exactamente igual que export_current_block(), 
+        pero sin borrar historial y usando saves/ en lugar de pings/."""
         try:
-            ip_folder = f"saves/{self.ip}"
-            os.makedirs(ip_folder, exist_ok=True)
+            if not self.historial:
+                QMessageBox.warning(self, "Sin datos", "No hay datos para guardar.")
+                return
 
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            filename = f"{ip_folder}/save_{timestamp}.txt"
+            ts_inicio = self.historial[0][0]
+            ts_fin = self.historial[-1][0]
 
-            with open(filename, "w", encoding="utf-8") as f:
+            fecha_inicio = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(ts_inicio))
+            fecha_fin = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(ts_fin))
+
+            # Carpeta de salida (saves/ip/)
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            carpeta_ip = os.path.join(base_dir, "saves", self.ip)
+            os.makedirs(carpeta_ip, exist_ok=True)
+
+            # nombre estilo autosave pero con "save_"
+            nombre_archivo = f"save_{self.ip}_{fecha_inicio}_a_{fecha_fin}.csv"
+            ruta_completa = os.path.join(carpeta_ip, nombre_archivo)
+
+            # Escritura igual a export_current_block()
+            with open(ruta_completa, "w", encoding="utf-8") as f:
+                f.write(f"# Ping session (manual save)\n")
+                f.write(f"# IP: {self.ip}\n")
+                f.write(f"# Inicio: {fecha_inicio}\n")
+                f.write(f"# Fin: {fecha_fin}\n")
+                f.write("datetime,latencia_ms,respuesta\n")
+
                 for item in self.historial:
-                    # Asegurar que tiene 3 campos
                     if len(item) == 3:
                         ts, ms, linea = item
                     else:
-                        # si por error quedó de 2, completar
                         ts, ms = item
                         linea = ""
-                    hora = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
-                    f.write(f"{hora} | {ms} ms | {linea}\n")
+                    dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                    f.write(f"{dt},{ms if ms is not None else 'FAIL'},\"{linea}\"\n")
 
-            QMessageBox.information(self, "Guardado", f"Archivo guardado en:\n{filename}")
+            QMessageBox.information(self, "Guardado", f"Archivo guardado en:\n{ruta_completa}")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"No se pudo guardar:\n{str(e)}")
-
-
 
     def export_current_block(self):
         """Guarda la sesión actual en un archivo y continúa."""
@@ -402,16 +433,15 @@ class PingMonitor(QtWidgets.QMainWindow):
                 f.write(f"# IP: {self.ip}\n")
                 f.write(f"# Inicio: {fecha_inicio}\n")
                 f.write(f"# Fin: {fecha_fin}\n")
-                f.write("timestamp,datetime,latencia_ms,linea_ping\n")
+                f.write("datetime,latencia_ms,respuesta\n")
                 for ts, ms, linea in self.historial:
                     dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-                    f.write(f"{ts},{dt},{ms if ms is not None else 'FAIL'},\"{linea}\"\n")
+                    f.write(f"{dt},{ms if ms is not None else 'FAIL'},\"{linea}\"\n")
 
             print(f"Bloque guardado: {ruta_completa}")
             self.historial = []  # limpiar para siguiente bloque
         except Exception as e:
             print("Error al guardar archivo:", e)
-
 
     def update_plot(self):
         n = len(self.latencias)
@@ -457,7 +487,6 @@ class PingMonitor(QtWidgets.QMainWindow):
         self.curve.setData([], [])
         self.scatter.setData([], [])
         self.status_label.setText("Limpio")
-    
     
     def closeEvent(self, event):
         # Guardar lo que quede en historial
