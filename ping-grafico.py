@@ -166,37 +166,46 @@ class PingThread(Thread):
         self.process = None
 
     def run(self):
-        """Ejecuta ping -t y lee línea por línea."""
+        """Ejecuta ping -n 100 repetidamente y lee línea por línea."""
         try:
-            # Ejecutar ping -t (Windows) o ping sin límite (Linux/Mac)
-            if sys.platform == "win32":
-                cmd = ["ping", "-t", self.ip]
-            else:
-                cmd = ["ping", self.ip]
-            
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
+            while self.running:
+                # Ejecutar ping -n 100 (Windows) o -c 100 (Linux/Mac)
+                if sys.platform == "win32":
+                    cmd = ["ping", "-n", "100", self.ip]
+                else:
+                    cmd = ["ping", "-c", "100", self.ip]
+                
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
 
-            # Leer línea por línea
-            for line in iter(self.process.stdout.readline, ''):
+                # Leer línea por línea
+                for line in iter(self.process.stdout.readline, ''):
+                    if not self.running:
+                        break
+                    
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # Procesar línea
+                    ts = time.time()
+                    ms, linea_limpia = self.parse_line(line)
+                    
+                    # Enviar a la cola solo si es una línea válida
+                    if linea_limpia is not None:
+                        self.queue.put((ts, ms, linea_limpia))
+                
+                # Esperar a que termine el proceso
+                self.process.wait()
+                
+                # Si no estamos corriendo, salir del loop
                 if not self.running:
                     break
-                
-                line = line.strip()
-                if not line:
-                    continue
-
-                # Procesar línea
-                ts = time.time()
-                ms, linea_limpia = self.parse_line(line)
-                
-                # Enviar a la cola
-                self.queue.put((ts, ms, linea_limpia))
 
         except Exception as e:
             self.queue.put((time.time(), None, f"error: {str(e)}"))
@@ -299,9 +308,9 @@ class PingMonitor(QtWidgets.QMainWindow):
     def init_ui(self):
         # Título con nombre (si existe) e IP
         if self.nombre:
-            titulo = f"Ping Monitor — {self.nombre} ({self.ip})"
+            titulo = f"Ping Monitor — {self.nombre} ({self.ip}) [Lotes de 100]"
         else:
-            titulo = f"Ping Monitor — {self.ip}"
+            titulo = f"Ping Monitor — {self.ip} [Lotes de 100]"
         
         self.setWindowTitle(titulo)
         try:
@@ -396,6 +405,13 @@ class PingMonitor(QtWidgets.QMainWindow):
 
         self.historial.append((ts, ms, linea_limpia))
 
+        # Contadores de paquetes
+        self.paquetes_enviados += 1
+        if ms is not None:
+            self.paquetes_recibidos += 1
+        else:
+            self.paquetes_perdidos += 1
+
         # hora
         hora = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
 
@@ -409,6 +425,26 @@ class PingMonitor(QtWidgets.QMainWindow):
         if ms is not None:
             self.latencias_validas.append(ms)
 
+        # registrar
+        self.tiempos.append(ts)
+        self.latencias.append(ms if ms is not None else 0)
+
+        # actualizar status label
+        if ms is None:
+            self.status_label.setText(f"{hora} - FAIL")
+        else:
+            self.status_label.setText(f"{hora} - {ms} ms")
+
+        # Actualizar gráfica y consola en cada ping
+        self.update_plot()
+        self.update_console()
+
+        # Guardar cada MAX_POINTS muestras
+        if len(self.historial) % MAX_POINTS == 0:
+            self.export_current_block()
+    
+    def update_console(self):
+        """Actualiza la consola con todo el historial y estadísticas."""
         # Limpiar el contenido de la consola y redibujar todo
         self.console.clear()
         
@@ -426,39 +462,40 @@ class PingMonitor(QtWidgets.QMainWindow):
             )
         
         # Agregar línea de estadísticas al final
+        self.console.append(
+            f'<br><span style="color:{FG_COLOR}">──────────────────────────────────────</span>'
+        )
+        
+        # Estadísticas de latencia
         if self.latencias_validas:
             minimo = min(self.latencias_validas)
             maximo = max(self.latencias_validas)
             media = sum(self.latencias_validas) / len(self.latencias_validas)
             
             self.console.append(
-                f'<br><span style="color:{FG_COLOR}">──────────────────────────────────────</span>'
+                f'<span style="color:{FG_COLOR}">Latencia: Mínimo = {minimo}ms, Máximo = {maximo}ms, Media = {media:.1f}ms</span>'
             )
-            self.console.append(
-                f'<span style="color:{FG_COLOR}">Estadísticas: Mínimo = {minimo}ms, Máximo = {maximo}ms, Media = {media:.1f}ms</span>'
-            )
+        
+        # Estadísticas de paquetes
+        porcentaje_perdida = (self.paquetes_perdidos / self.paquetes_enviados * 100) if self.paquetes_enviados > 0 else 0
+        
+        # Color para porcentaje de pérdida
+        if porcentaje_perdida == 0:
+            color_perdida = FG_COLOR
+        elif porcentaje_perdida < 5:
+            color_perdida = "#FFFF00"  # Amarillo
+        else:
+            color_perdida = COLOR_ALERTA  # Rojo
+        
+        self.console.append(
+            f'<span style="color:{FG_COLOR}">Paquetes: Enviados = {self.paquetes_enviados}, Recibidos = {self.paquetes_recibidos}, Perdidos = {self.paquetes_perdidos} </span>'
+            f'<span style="color:{color_perdida}">({porcentaje_perdida:.1f}% pérdida)</span>'
+        )
 
         # scroll automático al final
         self.console.verticalScrollBar().setValue(
             self.console.verticalScrollBar().maximum()
         )
-
-        # registrar
-        self.tiempos.append(ts)
-        self.latencias.append(ms if ms is not None else 0)
-
-        # actualizar status label
-        if ms is None:
-            self.status_label.setText(f"{hora} - FAIL")
-        else:
-            self.status_label.setText(f"{hora} - {ms} ms")
-
-        # actualizar gráfica
-        self.update_plot()
-
-        # Guardar cada MAX_POINTS muestras
-        if len(self.historial) % MAX_POINTS == 0:
-            self.export_current_block()
 
     def guardar_manual(self):
         """Guarda manualmente el historial actual."""
@@ -576,6 +613,9 @@ class PingMonitor(QtWidgets.QMainWindow):
         self.latencias.clear()
         self.tiempos.clear()
         self.latencias_validas.clear()
+        self.paquetes_enviados = 0
+        self.paquetes_recibidos = 0
+        self.paquetes_perdidos = 0
         self.curve.setData([], [])
         self.scatter.setData([], [])
         self.console.clear()
