@@ -3,3 +3,4 @@ pings/
 log/
 saves/
 direcciones.json
+__pycache__/
