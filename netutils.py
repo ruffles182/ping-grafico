@@ -68,8 +68,18 @@ def preparar_bd_sqlite(ip: str) -> sqlite3.Connection:
     # Construir ruta de la carpeta
     carpeta = os.path.join("pings", ip)
 
+    # Verificar si 'pings' existe y es un archivo (no directorio)
+    if os.path.exists("pings") and not os.path.isdir("pings"):
+        raise ValueError("Error: 'pings' existe como archivo. Debe ser eliminado o renombrado.")
+
     # Crear la estructura de carpetas si no existe
-    os.makedirs(carpeta, exist_ok=True)
+    try:
+        os.makedirs(carpeta, exist_ok=True)
+    except PermissionError:
+        raise PermissionError(
+            f"Error: No se tienen permisos para crear el directorio '{carpeta}'. "
+            "Verifica los permisos del directorio o ejecuta como administrador."
+        )
 
     # Ruta de la base de datos
     ruta_bd = os.path.join(carpeta, "datos.db")

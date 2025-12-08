@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import QMessageBox
 import pyqtgraph as pg
 
 from netutils import ping_unico, preparar_bd_sqlite, guardar_ping, validar_ip
+from mos_functions import calcular_mos, clasificar_mos
 
 # Configuración
 MAX_POINTS = 1800  # Puntos máximos en pantalla
@@ -28,6 +29,7 @@ FG_COLOR = "#00FF00"
 COLOR_ALERTA = "#FF0000"
 FONT_SIZE = 10
 TIEMPO_MAXIMO = 100  # ms para considerar alerta
+VENTANA_MOS = 50  # Calcular MOS cada 50 muestras
 
 
 class PingThread(Thread):
@@ -98,6 +100,13 @@ class VisorIndividual(QtWidgets.QMainWindow):
         self.paquetes_enviados = 0
         self.paquetes_recibidos = 0
         self.paquetes_perdidos = 0
+
+        # Ventana de 50 muestras para MOS
+        self.ventana_mos = deque(maxlen=VENTANA_MOS)  # [(latencia_ms, is_valida)]
+        self.mos_actual = None
+        self.r_factor_actual = None
+        self.latencia_efectiva_actual = None
+        self.calidad_actual = None
 
         # Queue y thread
         self.ping_queue = Queue()
@@ -170,6 +179,19 @@ class VisorIndividual(QtWidgets.QMainWindow):
 
         layout.addLayout(stats_layout)
 
+        # ===== ESTADÍSTICAS MOS =====
+        mos_layout = QtWidgets.QHBoxLayout()
+
+        self.label_mos = QtWidgets.QLabel("MOS: -- (esperando 50 muestras)")
+        self.label_mos.setStyleSheet("font-size: 12px; padding: 5px; background-color: #e8f4f8; border-radius: 3px; font-weight: bold;")
+        mos_layout.addWidget(self.label_mos)
+
+        self.label_jitter = QtWidgets.QLabel("Jitter: -- ms")
+        self.label_jitter.setStyleSheet("font-size: 12px; padding: 5px; background-color: #f0f0f0; border-radius: 3px;")
+        mos_layout.addWidget(self.label_jitter)
+
+        layout.addLayout(mos_layout)
+
         # ===== CONSOLA =====
         self.console = QtWidgets.QTextEdit()
         self.console.setReadOnly(True)
@@ -234,14 +256,23 @@ class VisorIndividual(QtWidgets.QMainWindow):
         if ms == -1:
             self.paquetes_perdidos += 1
             ms_display = 0  # Para gráfica
+            # Agregar a ventana MOS (paquete perdido)
+            self.ventana_mos.append((0, False))
         else:
             self.paquetes_recibidos += 1
             self.latencias_validas.append(ms)
             ms_display = ms
+            # Agregar a ventana MOS (paquete válido)
+            self.ventana_mos.append((ms, True))
 
         # Agregar a gráfica
         self.tiempos.append(ts)
         self.latencias.append(ms_display)
+
+        # Calcular MOS cuando la ventana se llena por primera vez, y luego cada 10 muestras
+        if len(self.ventana_mos) == VENTANA_MOS:
+            if self.paquetes_enviados == VENTANA_MOS or self.paquetes_enviados % 10 == 0:
+                self.calcular_y_actualizar_mos()
 
         # Actualizar UI
         self.update_status(ts, ms)
@@ -334,6 +365,78 @@ class VisorIndividual(QtWidgets.QMainWindow):
             self.console.verticalScrollBar().maximum()
         )
 
+    def calcular_y_actualizar_mos(self):
+        """Calcula el MOS a partir de la ventana de 50 muestras."""
+        if len(self.ventana_mos) < VENTANA_MOS:
+            return  # No hay suficientes muestras aún
+
+        # Separar latencias válidas y contar pérdidas
+        latencias_validas = [lat for lat, valida in self.ventana_mos if valida]
+        paquetes_perdidos = sum(1 for _, valida in self.ventana_mos if not valida)
+        perdida_porcentaje = (paquetes_perdidos / VENTANA_MOS) * 100
+
+        # Necesitamos al menos algunas muestras válidas para calcular MOS
+        if len(latencias_validas) < 5:
+            self.mos_actual = None
+            self.calidad_actual = "Insuficientes datos"
+            return
+
+        # Calcular latencia promedio
+        latencia_promedio = sum(latencias_validas) / len(latencias_validas)
+
+        # Calcular jitter (método PingPlotter: promedio de diferencias absolutas)
+        if len(latencias_validas) >= 2:
+            diferencias = [
+                abs(latencias_validas[i+1] - latencias_validas[i])
+                for i in range(len(latencias_validas) - 1)
+            ]
+            jitter = sum(diferencias) / len(diferencias)
+        else:
+            jitter = 0
+
+        # Calcular MOS
+        self.mos_actual, self.r_factor_actual, self.latencia_efectiva_actual = calcular_mos(
+            latencia_promedio, jitter, perdida_porcentaje
+        )
+        self.calidad_actual = clasificar_mos(self.mos_actual)
+
+        # Actualizar labels
+        self.update_mos_labels(jitter)
+
+    def update_mos_labels(self, jitter):
+        """Actualiza los labels de MOS con el último cálculo."""
+        if self.mos_actual is None:
+            self.label_mos.setText("MOS: -- (insuficientes datos)")
+            self.label_mos.setStyleSheet("font-size: 12px; padding: 5px; background-color: #f0f0f0; border-radius: 3px;")
+        else:
+            texto_mos = f"MOS: {self.mos_actual:.2f} ({self.calidad_actual})"
+            self.label_mos.setText(texto_mos)
+
+            # Color según calidad
+            if self.mos_actual >= 4.3:  # Excelente
+                color_fondo = "#ccffcc"
+                color_texto = "green"
+            elif self.mos_actual >= 4.0:  # Buena
+                color_fondo = "#e8f8e8"
+                color_texto = "darkgreen"
+            elif self.mos_actual >= 3.6:  # Aceptable
+                color_fondo = "#fff8cc"
+                color_texto = "darkorange"
+            elif self.mos_actual >= 3.1:  # Pobre
+                color_fondo = "#ffe8cc"
+                color_texto = "orange"
+            else:  # Mala
+                color_fondo = "#ffcccc"
+                color_texto = "red"
+
+            self.label_mos.setStyleSheet(
+                f"font-size: 12px; padding: 5px; background-color: {color_fondo}; "
+                f"border-radius: 3px; font-weight: bold; color: {color_texto};"
+            )
+
+        # Actualizar jitter
+        self.label_jitter.setText(f"Jitter: {jitter:.2f} ms")
+
     def toggle_pause(self, checked):
         """Pausa/reanuda el monitoreo."""
         if checked:
@@ -359,11 +462,21 @@ class VisorIndividual(QtWidgets.QMainWindow):
         self.paquetes_perdidos = 0
         self.historial.clear()
 
+        # Limpiar ventana MOS
+        self.ventana_mos.clear()
+        self.mos_actual = None
+        self.r_factor_actual = None
+        self.latencia_efectiva_actual = None
+        self.calidad_actual = None
+
         self.curve.setData([], [])
         self.scatter.setData([], [])
         self.console.clear()
 
         self.update_stats()
+        self.label_mos.setText("MOS: -- (esperando 50 muestras)")
+        self.label_mos.setStyleSheet("font-size: 12px; padding: 5px; background-color: #e8f4f8; border-radius: 3px; font-weight: bold;")
+        self.label_jitter.setText("Jitter: -- ms")
         self.status_label.setText("Limpiado")
 
     def export_csv(self):
