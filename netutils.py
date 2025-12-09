@@ -34,19 +34,21 @@ def validar_ip(ip: str) -> bool:
 
 def ping_unico(ip: str) -> float:
     """
-    Hace un solo ping a la IP dada, con timeout de 1 segundo.
-    
+    Hace un solo ping a la IP dada, con timeout de 4 segundos (estándar Windows).
+    Intenta mantener un intervalo de 1 segundo entre pings (como ping -t en Windows).
+
     - Si no hay respuesta -> retorna -1
-    - Si hay respuesta -> retorna el ping en ms
-      y hace un sleep para completar 1 segundo total.
+    - Si hay respuesta en < 1 seg -> retorna el ping en ms y espera hasta completar 1 segundo
+    - Si tarda >= 1 seg -> retorna el ping en ms sin espera adicional
     """
-    rtt = ping(ip, timeout=1)
+    rtt = ping(ip, timeout=4)
 
     if rtt is None:
         return -1
 
     ms = rtt * 1000
 
+    # Solo espera si el ping fue más rápido que 1 segundo
     espera = 1 - rtt
     if espera > 0:
         time.sleep(espera)
