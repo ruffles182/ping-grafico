@@ -61,6 +61,11 @@ def preparar_bd_sqlite(ip: str) -> sqlite3.Connection:
     Crea la estructura de carpetas pings/IP/ si no existe.
     Crea/abre el archivo datos.db y crea la tabla si no existe.
 
+    OPTIMIZACIONES PARA GRABACIÓN 24/7:
+    - Modo WAL (Write-Ahead Logging) para mejor concurrencia
+    - Pragmas optimizados para reducir latencia de escritura
+    - Batch commits para evitar bloquear el thread de pings
+
     Args:
         ip: Dirección IP a monitorear
 
@@ -89,8 +94,27 @@ def preparar_bd_sqlite(ip: str) -> sqlite3.Connection:
     # Conectar a la base de datos (se crea si no existe)
     conn = sqlite3.connect(ruta_bd, check_same_thread=False)
 
-    # Crear la tabla si no existe
+    # ===== OPTIMIZACIONES DE RENDIMIENTO =====
     cursor = conn.cursor()
+
+    # 1. Modo WAL (Write-Ahead Logging): permite lecturas concurrentes durante escrituras
+    #    y reduce latencia de escritura significativamente
+    cursor.execute("PRAGMA journal_mode=WAL")
+
+    # 2. synchronous=NORMAL: Balance entre velocidad y seguridad
+    #    FULL (default) = fsync en cada commit (~10-15ms)
+    #    NORMAL = fsync solo en checkpoints (~1-2ms por commit)
+    #    Riesgo: Solo se pierden datos si hay fallo de SO + fallo de energía simultáneamente
+    cursor.execute("PRAGMA synchronous=NORMAL")
+
+    # 3. cache_size: Mantener más páginas en memoria (default=2000 páginas = ~8MB)
+    #    Aumentar a 10000 páginas = ~40MB para operaciones 24/7
+    cursor.execute("PRAGMA cache_size=10000")
+
+    # 4. temp_store=MEMORY: Usar RAM para operaciones temporales
+    cursor.execute("PRAGMA temp_store=MEMORY")
+
+    # Crear la tabla si no existe
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,9 +132,71 @@ def preparar_bd_sqlite(ip: str) -> sqlite3.Connection:
 
     return conn
 
+class BatchPingSaver:
+    """
+    Gestor de guardado por lotes para optimizar escrituras a SQLite.
+
+    En lugar de hacer commit() después de cada ping (bloqueante ~10-15ms),
+    acumula pings en un buffer y hace commit cada N pings o cada X segundos.
+
+    Esto reduce drásticamente la latencia de I/O en el thread de pings,
+    permitiendo que los pings se ejecuten con mayor precisión temporal.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, batch_size: int = 10):
+        """
+        Args:
+            conn: Conexión a la base de datos SQLite
+            batch_size: Cantidad de pings a acumular antes de hacer commit
+        """
+        self.conn = conn
+        self.batch_size = batch_size
+        self.buffer = []  # [(timestamp, tiempo_ms), ...]
+        self.cursor = conn.cursor()
+
+    def agregar_ping(self, tiempo_ms: float):
+        """
+        Agrega un ping al buffer. Hace commit automático si se alcanza batch_size.
+
+        Args:
+            tiempo_ms: Tiempo de respuesta en milisegundos (-1 si timeout)
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.buffer.append((timestamp, tiempo_ms))
+
+        # Hacer commit si se alcanzó el tamaño del batch
+        if len(self.buffer) >= self.batch_size:
+            self.flush()
+
+    def flush(self):
+        """
+        Fuerza el guardado de todos los pings pendientes en el buffer.
+        Llamar al cerrar la aplicación para no perder datos.
+        """
+        if not self.buffer:
+            return
+
+        # Insertar todos los pings del buffer
+        self.cursor.executemany(
+            "INSERT INTO pings (timestamp, tiempo_ms) VALUES (?, ?)",
+            self.buffer
+        )
+        self.conn.commit()
+
+        # Limpiar buffer
+        self.buffer.clear()
+
+    def close(self):
+        """Guarda datos pendientes y cierra."""
+        self.flush()
+
+
 def guardar_ping(conn: sqlite3.Connection, tiempo_ms: float):
     """
-    Guarda un ping en la base de datos SQLite.
+    Guarda un ping en la base de datos SQLite (modo inmediato, sin batch).
+
+    NOTA: Esta función hace commit() inmediato, lo cual puede causar latencia
+    en operaciones 24/7. Para mejor rendimiento, usar BatchPingSaver.
 
     Args:
         conn: Conexión a la base de datos SQLite
