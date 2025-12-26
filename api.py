@@ -78,7 +78,9 @@ def get_db_connection(ip: str) -> sqlite3.Connection:
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"No se encontró base de datos para IP {ip}")
 
-    conn = sqlite3.connect(str(db_path))
+    # Abrir en modo de solo lectura para evitar conflictos con el proceso que escribe
+    # y no requerir permisos de escritura (importante para bases de datos en modo WAL)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row  # Permite acceso por nombre de columna
     return conn
 
